@@ -1,4 +1,4 @@
-"""X-ray backend for TigerFeat."""
+"""X-ray backend for TigerEncode."""
 
 import numpy as np
 import torch
@@ -7,9 +7,9 @@ import torchxrayvision as xrv
 from skimage import io as skio
 import torchvision.transforms as tv_transforms
 from torch.utils.data import Dataset
-from .base import TigerFeatBackend
+from .base import TigerEncodeBackend
 
-class XrayBackend(TigerFeatBackend):
+class XrayBackend(TigerEncodeBackend):
     def initialise(self):
         self.model = xrv.models.get_model(self.config.model.split("@", 1)[1])
         self.model.eval()

@@ -1,10 +1,10 @@
-"""Base backend for TigerFeat."""
+"""Base backend for TigerEncode image models."""
 
 from abc import ABC, abstractmethod
 import torch
 
-class TigerFeatBackend(ABC):
-    """Abstract base class for TigerFeat backends."""
+class TigerEncodeBackend(ABC):
+    """Abstract base class for TigerEncode image backends."""
 
     def __init__(self, config, device):
         self.config = config

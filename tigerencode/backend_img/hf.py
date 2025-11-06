@@ -1,11 +1,11 @@
-"""Hugging Face backend for TigerFeat."""
+"""Hugging Face backend for TigerEncode."""
 
 import torch
 from transformers import AutoModel, AutoProcessor
 from PIL import Image
-from .base import TigerFeatBackend
+from .base import TigerEncodeBackend
 
-class HfBackend(TigerFeatBackend):
+class HfBackend(TigerEncodeBackend):
     def initialise(self):
         self.processor = AutoProcessor.from_pretrained(self.config.model.split("@", 1)[1])
         self.model = AutoModel.from_pretrained(self.config.model.split("@", 1)[1]).to(self.device)
