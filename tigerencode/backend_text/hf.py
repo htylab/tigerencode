@@ -11,8 +11,12 @@ class HfTextBackend(TigerEncodeTextBackend):
 
     def initialise(self):
         model_id = self.config.model.split("@", 1)[1]
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModel.from_pretrained(model_id).to(self.device)
+        token_kwargs = {}
+        if getattr(self.config, "token", None):
+            token_kwargs["token"] = self.config.token
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, **token_kwargs)
+        self.model = AutoModel.from_pretrained(model_id, **token_kwargs).to(self.device)
         self.model.eval()
 
     def prepare_text(self, text):
