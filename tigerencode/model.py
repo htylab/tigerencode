@@ -239,6 +239,3 @@ class TigerEncodeTextModel(_BaseModel):
         feats = torch.cat(all_feats, dim=0).numpy()
         return feats, processed
 
-
-# Backwards compatibility alias for older imports
-TigerEncodeModel = TigerEncodeImageModel
