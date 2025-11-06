@@ -30,10 +30,6 @@ dependencies = [
     "timm",
     "tqdm",
     "transformers",
-]
-
-[project.optional-dependencies]
-xray = [
     "torchxrayvision",
     "scikit-image",
     "torchvision",
