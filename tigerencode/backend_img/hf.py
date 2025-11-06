@@ -7,8 +7,13 @@ from .base import TigerEncodeBackend
 
 class HfBackend(TigerEncodeBackend):
     def initialise(self):
-        self.processor = AutoProcessor.from_pretrained(self.config.model.split("@", 1)[1])
-        self.model = AutoModel.from_pretrained(self.config.model.split("@", 1)[1]).to(self.device)
+        model_id = self.config.model.split("@", 1)[1]
+        token_kwargs = {}
+        if getattr(self.config, "token", None):
+            token_kwargs["token"] = self.config.token
+
+        self.processor = AutoProcessor.from_pretrained(model_id, **token_kwargs)
+        self.model = AutoModel.from_pretrained(model_id, **token_kwargs).to(self.device)
         self.model.eval()
 
         processor = getattr(self.processor, "image_processor", self.processor)

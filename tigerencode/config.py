@@ -10,11 +10,13 @@ class TigerEncodeConfig(object):
         pretrained=True,
         device=None,
         transform_kwargs=None,
+        token=None,
     ):
         self.model = model
         self.pretrained = pretrained
         self.device = device
         self.transform_kwargs = transform_kwargs or {}
+        self.token = token
 
 
 def _normalise_model_kwargs(kwargs):
