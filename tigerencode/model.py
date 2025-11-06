@@ -213,7 +213,16 @@ class TigerEncodeTextModel(_BaseModel):
         feats = self.backend.forward(inputs)
         return feats.detach().cpu().squeeze(0).numpy()
 
-    def encode_text_batch(self, texts, batch_size=16):
+    def encode_text_batch(
+        self,
+        texts,
+        batch_size=16,
+        num_workers=None,
+        pin_memory=True,
+        show_progress=None,
+        use_dataloader=None,
+        dataloader_threshold=1000,
+    ):
         if isinstance(texts, str):
             texts = [texts]
         elif not isinstance(texts, (list, tuple)):
@@ -224,14 +233,67 @@ class TigerEncodeTextModel(_BaseModel):
         if n == 0:
             return np.empty((0,), dtype=np.float32), []
 
+        try:
+            from tqdm import tqdm as _tqdm
+        except Exception:
+            _tqdm = None
+
+        if show_progress is None:
+            show_progress = n >= dataloader_threshold
+
+        if use_dataloader is None:
+            use_dataloader = n >= dataloader_threshold
+
+        if num_workers is None:
+            num_workers = 8 if self.device.type == "cuda" else 0
+
         all_feats = []
         processed = []
-        for start in range(0, n, batch_size):
-            chunk = texts[start : start + batch_size]
-            inputs = self.backend.prepare_text_batch(chunk)
-            feats = self.backend.forward(inputs)
-            all_feats.append(feats.detach().cpu())
-            processed.extend(chunk)
+
+        if use_dataloader:
+            class _TextDataset(torch.utils.data.Dataset):
+                def __init__(self, items):
+                    self.items = items
+
+                def __len__(self):
+                    return len(self.items)
+
+                def __getitem__(self, idx):
+                    return self.items[idx]
+
+            dataset = _TextDataset(texts)
+            loader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                drop_last=False,
+            )
+            iterator = _tqdm(loader, desc="Extracting") if (show_progress and _tqdm) else loader
+            with torch.no_grad():
+                for batch in iterator:
+                    if not batch:
+                        continue
+                    inputs = self.backend.prepare_text_batch(batch)
+                    feats = self.backend.forward(inputs)
+                    all_feats.append(feats.detach().cpu())
+                    processed.extend(list(batch))
+        else:
+            rng = (
+                _tqdm(range(0, n, batch_size), desc="Extracting")
+                if (show_progress and _tqdm)
+                else range(0, n, batch_size)
+            )
+            with torch.no_grad():
+                for start in rng:
+                    chunk = texts[start : start + batch_size]
+                    if not chunk:
+                        continue
+                    inputs = self.backend.prepare_text_batch(chunk)
+                    feats = self.backend.forward(inputs)
+                    all_feats.append(feats.detach().cpu())
+                    processed.extend(chunk)
 
         if not all_feats:
             return np.empty((0,), dtype=np.float32), []
