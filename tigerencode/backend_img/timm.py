@@ -1,4 +1,4 @@
-"""TIMM backend for TigerFeat."""
+"""TIMM backend for TigerEncode."""
 
 import torch
 import timm
@@ -6,9 +6,9 @@ from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
 from PIL import Image
 from torch.utils.data import Dataset
-from .base import TigerFeatBackend
+from .base import TigerEncodeBackend
 
-class TimmBackend(TigerFeatBackend):
+class TimmBackend(TigerEncodeBackend):
     def initialise(self):
         self.model = timm.create_model(
             self.config.model.split("@", 1)[1],

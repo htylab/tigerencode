@@ -1,7 +1,8 @@
-"""Configuration for TigerFeat."""
+"""Configuration for TigerEncode models."""
 
-class TigerFeatConfig(object):
-    """Simple configuration container for TigerFeatModel."""
+
+class TigerEncodeConfig(object):
+    """Simple configuration container for TigerEncode models."""
 
     def __init__(
         self,

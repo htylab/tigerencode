@@ -1,33 +1,42 @@
-"""Core TigerFeat model."""
+"""Core TigerEncode models for image and text encoding."""
 
 import os
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
-from .config import TigerFeatConfig, _normalise_model_kwargs
-from .backends.base import TigerFeatBackend
 
-# Lazy import backends
-def _get_backend_class(backend_name):
+from .config import TigerEncodeConfig, _normalise_model_kwargs
+
+
+def _get_image_backend_class(backend_name):
     if backend_name == "timm":
-        from .backends.timm import TimmBackend
+        from .backend_img.timm import TimmBackend
+
         return TimmBackend
-    elif backend_name == "xray":
-        from .backends.xray import XrayBackend
+    if backend_name == "xray":
+        from .backend_img.xray import XrayBackend
+
         return XrayBackend
-    elif backend_name == "hf":
-        from .backends.hf import HfBackend
+    if backend_name == "hf":
+        from .backend_img.hf import HfBackend
+
         return HfBackend
-    else:
-        raise ValueError(f"Unsupported backend: {backend_name}")
+    raise ValueError(f"Unsupported image backend: {backend_name}")
 
-class TigerFeatModel(object):
-    """Lightweight wrapper for vision models with feat extraction."""
 
+def _get_text_backend_class(backend_name):
+    if backend_name == "hf":
+        from .backend_text.hf import HfTextBackend
+
+        return HfTextBackend
+    raise ValueError(f"Unsupported text backend: {backend_name}")
+
+
+class _BaseModel:
     def __init__(self, config=None, **kwargs):
         if config is None:
-            config = TigerFeatConfig(**_normalise_model_kwargs(kwargs))
+            config = TigerEncodeConfig(**_normalise_model_kwargs(kwargs))
         elif kwargs:
             raise ValueError("Provide either a config object or keyword arguments, not both.")
 
@@ -42,10 +51,6 @@ class TigerFeatModel(object):
         if not self.backend_name or not self.model_name:
             raise ValueError("Model must include backend and name separated by '@'.")
 
-        BackendClass = _get_backend_class(self.backend_name)
-        self.backend = BackendClass(self.config, self.device)
-        self.backend.initialise()
-
     @staticmethod
     def _resolve_device(device):
         if device is None:
@@ -55,6 +60,24 @@ class TigerFeatModel(object):
                 return torch.device("mps")
             return torch.device("cpu")
         return torch.device(device)
+
+    def info(self):
+        return {
+            "backend": self.backend_name,
+            "model_name": self.model_name,
+            "device": str(self.device),
+            **self.backend.info(),
+        }
+
+
+class TigerEncodeImageModel(_BaseModel):
+    """Wrapper for image models providing image encoding utilities."""
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config, **kwargs)
+        BackendClass = _get_image_backend_class(self.backend_name)
+        self.backend = BackendClass(self.config, self.device)
+        self.backend.initialise()
 
     def _safe_open_pil(self, path):
         if not isinstance(path, str):
@@ -67,7 +90,7 @@ class TigerFeatModel(object):
         except Exception as e:
             raise IOError(f"Failed to open image {path}: {e}")
 
-    def feat(self, image_path):
+    def encode_image(self, image_path):
         if not isinstance(image_path, str):
             raise TypeError("Image input must be a file path string.")
         try:
@@ -78,7 +101,7 @@ class TigerFeatModel(object):
             print(f"[Warning] Skipped {image_path}: {e}")
             return np.empty((0,), dtype=np.float32)
 
-    def feat_batch(
+    def encode_image_batch(
         self,
         images,
         batch_size=16,
@@ -137,9 +160,13 @@ class TigerFeatModel(object):
                     filelist.extend(paths)
         else:
             # Fallback to loop (e.g., for HF)
-            rng = _tqdm(range(0, n, batch_size), desc="Extracting") if (show_progress and _tqdm) else range(0, n, batch_size)
+            rng = (
+                _tqdm(range(0, n, batch_size), desc="Extracting")
+                if (show_progress and _tqdm)
+                else range(0, n, batch_size)
+            )
             for start in rng:
-                chunk = images[start:start + batch_size]
+                chunk = images[start : start + batch_size]
                 inputs_list, valids = [], []
                 for p in chunk:
                     try:
@@ -153,7 +180,9 @@ class TigerFeatModel(object):
                 if not inputs_list:
                     continue
                 if self.backend_name == "hf":
-                    inputs = self.backend.processor(images=inputs_list, return_tensors="pt").to(self.device)
+                    inputs = self.backend.processor(images=inputs_list, return_tensors="pt").to(
+                        self.device
+                    )
                     feats = self.backend.forward(inputs)
                 else:
                     batch = torch.cat(inputs_list, dim=0)
@@ -167,10 +196,46 @@ class TigerFeatModel(object):
         feats = torch.cat(all_feats, dim=0).numpy()
         return feats, filelist
 
-    def info(self):
-        return {
-            "backend": self.backend_name,
-            "model_name": self.model_name,
-            "device": str(self.device),
-            **self.backend.info(),
-        }
+
+class TigerEncodeTextModel(_BaseModel):
+    """Wrapper for text models providing text encoding utilities."""
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config, **kwargs)
+        BackendClass = _get_text_backend_class(self.backend_name)
+        self.backend = BackendClass(self.config, self.device)
+        self.backend.initialise()
+
+    def encode_text(self, text):
+        if not isinstance(text, str):
+            raise TypeError("Text input must be a string.")
+        inputs = self.backend.prepare_text(text)
+        feats = self.backend.forward(inputs)
+        return feats.detach().cpu().squeeze(0).numpy()
+
+    def encode_text_batch(self, texts, batch_size=16):
+        if isinstance(texts, str):
+            texts = [texts]
+        elif not isinstance(texts, (list, tuple)):
+            raise TypeError("Input must be a list/tuple of text strings.")
+
+        texts = [t for t in texts if isinstance(t, str) and t]
+        n = len(texts)
+        if n == 0:
+            return np.empty((0,), dtype=np.float32), []
+
+        all_feats = []
+        processed = []
+        for start in range(0, n, batch_size):
+            chunk = texts[start : start + batch_size]
+            inputs = self.backend.prepare_text_batch(chunk)
+            feats = self.backend.forward(inputs)
+            all_feats.append(feats.detach().cpu())
+            processed.extend(chunk)
+
+        if not all_feats:
+            return np.empty((0,), dtype=np.float32), []
+
+        feats = torch.cat(all_feats, dim=0).numpy()
+        return feats, processed
+
