@@ -2,6 +2,20 @@
 
 Utilities for encoding images and text with multiple backends.
 
+## Installation
+
+Install the latest version directly from GitHub with pip:
+
+```bash
+pip install https://github.com/htylab/tigerencode/archive/main.zip
+```
+
+If you plan to use the optional X-ray backend, include the `xray` extra:
+
+```bash
+pip install "https://github.com/htylab/tigerencode/archive/main.zip#egg=tigerencode[xray]"
+```
+
 ## Usage
 
 ```python
