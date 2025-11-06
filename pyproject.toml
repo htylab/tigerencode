@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tigerencode"
+version = "0.1.0"
+description = "Utilities for encoding images and text with multiple backends."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "BSD-3-Clause"}
+authors = [
+    {name = "HTY Lab"}
+]
+keywords = ["machine-learning", "vision", "nlp", "embeddings"]
+classifiers = [
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy",
+    "Pillow",
+    "torch",
+    "timm",
+    "tqdm",
+    "transformers",
+    "torchxrayvision",
+    "scikit-image",
+    "torchvision",
+]
+
+[project.urls]
+Homepage = "https://github.com/htylab/tigerencode"
+Source = "https://github.com/htylab/tigerencode"
+Issues = "https://github.com/htylab/tigerencode/issues"

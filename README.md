@@ -2,6 +2,14 @@
 
 Utilities for encoding images and text with multiple backends.
 
+## Installation
+
+Install the latest version directly from GitHub with pip. All backends and their dependencies are included by default:
+
+```bash
+pip install https://github.com/htylab/tigerencode/archive/main.zip
+```
+
 ## Usage
 
 ```python
