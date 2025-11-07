@@ -6,7 +6,7 @@ class TigerEncodeConfig(object):
 
     def __init__(
         self,
-        model="timm@resnet50",
+        model="",
         pretrained=True,
         device=None,
         transform_kwargs=None,
@@ -17,11 +17,3 @@ class TigerEncodeConfig(object):
         self.device = device
         self.transform_kwargs = transform_kwargs or {}
         self.token = token
-
-
-def _normalise_model_kwargs(kwargs):
-    if "model_name" in kwargs and "model" not in kwargs:
-        new_kwargs = dict(kwargs)
-        new_kwargs["model"] = new_kwargs.pop("model_name")
-        return new_kwargs
-    return kwargs

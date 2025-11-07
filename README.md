@@ -30,4 +30,10 @@ text_features_batch, texts = text_model.encode_text_batch([
     "hello, world!",
     "I am good",
 ])
+
+# Use a Hugging Face model that requires authentication
+private_text_model = tigerencode.model_text(
+    model="hf@your-org/your-private-model",
+    token="hf_xxx-your-token",
+)
 ```

@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from .config import TigerEncodeConfig, _normalise_model_kwargs
+from .config import TigerEncodeConfig
 
 
 def _get_image_backend_class(backend_name):
@@ -36,7 +36,7 @@ def _get_text_backend_class(backend_name):
 class _BaseModel:
     def __init__(self, config=None, **kwargs):
         if config is None:
-            config = TigerEncodeConfig(**_normalise_model_kwargs(kwargs))
+            config = TigerEncodeConfig(**kwargs)
         elif kwargs:
             raise ValueError("Provide either a config object or keyword arguments, not both.")
 
