@@ -7,10 +7,11 @@ from .model import TigerEncodeImageModel, TigerEncodeTextModel
 def model_img(**kwargs):
     """Initialise an image encoding model."""
 
+    adaptor = kwargs.pop("adaptor", None)
     resolved = dict(kwargs)
     resolved.setdefault("model", "timm@resnet50")
     config = TigerEncodeConfig(**resolved)
-    return TigerEncodeImageModel(config)
+    return TigerEncodeImageModel(config, adaptor=adaptor)
 
 
 def model_text(**kwargs):

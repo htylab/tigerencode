@@ -33,6 +33,7 @@ dependencies = [
     "torchxrayvision",
     "scikit-image",
     "torchvision",
+    "onnx2torch",
 ]
 
 [project.urls]
