@@ -36,4 +36,20 @@ private_text_model = tigerencode.model_text(
     model="hf@your-org/your-private-model",
     token="hf_xxx-your-token",
 )
+
+# Optionally attach an adaptor implemented as a torch.nn.Module
+from torch import nn
+
+projection = nn.Linear(768, 768, bias=False)
+image_model.set_adaptor(projection)
+
+# Or supply an ONNX adaptor path (converted via `onnx2torch`)
+image_model_with_onnx = tigerencode.model_img(
+    model="timm@resnet50",
+    adaptor="/path/to/adaptor.onnx",
+)
 ```
+
+When an ONNX file path is provided, TigerEncode will lazily convert it to a PyTorch
+module using [`onnx2torch`](https://github.com/onnx/onnx2torch), which is installed
+alongside the package.

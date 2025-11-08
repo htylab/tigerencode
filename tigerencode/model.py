@@ -73,11 +73,69 @@ class _BaseModel:
 class TigerEncodeImageModel(_BaseModel):
     """Wrapper for image models providing image encoding utilities."""
 
-    def __init__(self, config=None, **kwargs):
+    def __init__(self, config=None, adaptor=None, **kwargs):
         super().__init__(config, **kwargs)
         BackendClass = _get_image_backend_class(self.backend_name)
         self.backend = BackendClass(self.config, self.device)
         self.backend.initialise()
+        self.adaptor = None
+        self.adaptor_source = None
+        self.set_adaptor(adaptor)
+
+    def set_adaptor(self, adaptor):
+        """Attach or remove an adaptor module applied to encoder outputs."""
+
+        if adaptor is None:
+            self.adaptor = None
+            self.adaptor_source = None
+            return
+
+        source = adaptor
+        if isinstance(adaptor, str):
+            adaptor = self._load_onnx_adaptor(adaptor)
+
+        if not hasattr(adaptor, "forward"):
+            raise TypeError("Adaptor must be a torch.nn.Module or compatible callable.")
+
+        try:
+            adaptor = adaptor.to(self.device)
+        except AttributeError as exc:  # pragma: no cover - defensive
+            raise TypeError("Adaptor must support `.to(device)` for placement.") from exc
+
+        adaptor.eval()
+        self.adaptor = adaptor
+        if isinstance(source, str):
+            self.adaptor_source = os.path.abspath(source)
+        else:
+            self.adaptor_source = f"{adaptor.__class__.__module__}.{adaptor.__class__.__name__}"
+
+    def _apply_adaptor(self, feats):
+        if self.adaptor is None:
+            return feats
+        with torch.no_grad():
+            return self.adaptor(feats)
+
+    def _load_onnx_adaptor(self, path):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Adaptor ONNX file not found: {path}")
+        try:
+            from onnx2torch import convert
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError(
+                "onnx2torch is required to load adaptor models from ONNX files."
+            ) from exc
+
+        module = convert(path)
+        if not hasattr(module, "forward"):
+            raise TypeError("Converted adaptor must provide a forward method.")
+        return module
+
+    def info(self):
+        base_info = super().info()
+        base_info["has_adaptor"] = self.adaptor is not None
+        if self.adaptor is not None:
+            base_info["adaptor_source"] = self.adaptor_source
+        return base_info
 
     def _safe_open_pil(self, path):
         if not isinstance(path, str):
@@ -96,6 +154,7 @@ class TigerEncodeImageModel(_BaseModel):
         try:
             input_data = self.backend.prepare_image(image_path)
             feats = self.backend.forward(input_data)
+            feats = self._apply_adaptor(feats)
             return feats.detach().cpu().squeeze(0).numpy()
         except Exception as e:
             print(f"[Warning] Skipped {image_path}: {e}")
@@ -156,6 +215,7 @@ class TigerEncodeImageModel(_BaseModel):
                         continue
                     batch = batch.to(self.device)
                     feats = self.backend.forward(batch)
+                    feats = self._apply_adaptor(feats)
                     all_feats.append(feats.detach().cpu())
                     filelist.extend(paths)
         else:
@@ -187,6 +247,7 @@ class TigerEncodeImageModel(_BaseModel):
                 else:
                     batch = torch.cat(inputs_list, dim=0)
                     feats = self.backend.forward(batch)
+                feats = self._apply_adaptor(feats)
                 all_feats.append(feats.detach().cpu())
                 filelist.extend(valids)
 
