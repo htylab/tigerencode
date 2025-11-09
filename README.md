@@ -48,6 +48,12 @@ image_model_with_onnx = tigerencode.model_img(
     model="timm@resnet50",
     adaptor="/path/to/adaptor.onnx",
 )
+
+# Use the built-in ProjectionAdaptor for feature normalization
+from tigerencode.adaptor import ProjectionAdaptor
+
+projection_adaptor = ProjectionAdaptor(in_dim=1024, out_dim=768)
+image_model.set_adaptor(projection_adaptor)
 ```
 
 When an ONNX file path is provided, TigerEncode will lazily convert it to a PyTorch
