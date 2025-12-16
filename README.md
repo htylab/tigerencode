@@ -59,3 +59,34 @@ image_model.set_adaptor(projection_adaptor)
 When an ONNX file path is provided, TigerEncode will lazily convert it to a PyTorch
 module using [`onnx2torch`](https://github.com/onnx/onnx2torch), which is installed
 alongside the package.
+
+## Embedding clustering utilities
+
+TigerEncode also ships with clustering helpers for cosine-similarity KNN graphs and Leiden
+community detection (requires the optional `python-igraph` and `leidenalg` packages; GPU
+acceleration is used when PyTorch with CUDA is available).
+
+```python
+import numpy as np
+import tigerencode
+
+# Generate example embeddings (N, D)
+embeddings = np.random.rand(10, 768).astype(np.float32)
+
+# Run the full KNN -> edge filtering -> Leiden pipeline
+cluster_ids = tigerencode.embed_clustering_leiden(
+    embeddings,
+    topk=50,
+    z_edge=0.5,
+    mutual_boost=1.5,
+    resolutions=1.0,
+)
+
+# Or merge near-duplicate embeddings without Leiden
+comp_id, merged_embeddings, comp_sizes, info = tigerencode.embed_clustering_mutualk_merge(
+    embeddings,
+    mutual_k=3,
+    merge_knn_topk=32,
+    merge_top_p=0.05,
+)
+```
