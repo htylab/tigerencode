@@ -534,6 +534,7 @@ def mutualk_merge_from_knn_sim(
     mutual_k=3,
     merge_top_p=1.0,
     merge_sim_min=None,
+    merge_sim_quantile=None,
     node_weight=None,
     max_cluster_weight=None,
     verbose=False,
@@ -544,8 +545,10 @@ def mutualk_merge_from_knn_sim(
     規則：
       - i 的前 mutual_k 近鄰中包含 j
       - j 的前 mutual_k 近鄰中包含 i
-      - (optional) sim(i,j) >= merge_sim_min
-      - 若 merge_top_p < 1：對候選邊依 sim 由大到小取前 p%
+      - similarity 門檻：
+          * 若 merge_sim_min != None：使用固定門檻（相容舊行為）
+          * 否則若 merge_sim_quantile != None：使用「mutual candidates 的 e_s」分位數當作門檻
+      - 若 merge_top_p < 1：對通過門檻之候選邊依 sim 由大到小取前 p%
 
     max_cluster_weight:
       - 若提供，合併當下會限制 component weight 不得超過上限。
@@ -568,6 +571,7 @@ def mutualk_merge_from_knn_sim(
         comp_id, roots = _compact_components(parent)
         return comp_id, {"n_candidates": 0, "n_edges_selected": 0, "n_unions": 0, "n_components": int(len(roots))}
 
+    # 1) 收集 mutual candidates（不先做 sim 過濾）
     e_i = []
     e_j = []
     e_s = []
@@ -593,13 +597,9 @@ def mutualk_merge_from_knn_sim(
             if i > j:
                 continue
 
-            s = float(row_sim[pos])
-            if merge_sim_min is not None and s < float(merge_sim_min):
-                continue
-
             e_i.append(int(i))
             e_j.append(int(j))
-            e_s.append(float(s))
+            e_s.append(float(row_sim[pos]))
 
     n_candidates = int(len(e_i))
     if verbose:
@@ -613,6 +613,37 @@ def mutualk_merge_from_knn_sim(
     e_i = np.asarray(e_i, dtype=np.int32)
     e_j = np.asarray(e_j, dtype=np.int32)
     e_s = np.asarray(e_s, dtype=np.float32)
+
+    # 2) 用 mutual candidates 的 e_s 分位數決定門檻（若未給 merge_sim_min）
+    if merge_sim_min is None and merge_sim_quantile is not None:
+        q = float(merge_sim_quantile)
+        if not (0.0 < q < 1.0):
+            raise ValueError("merge_sim_quantile must be in (0,1), got %r" % q)
+        merge_sim_min = float(np.quantile(e_s, q))
+        if verbose:
+            print(
+                "[mutualk/sim] quantile=%.4f => merge_sim_min=%.6f (from %d mutual edges)"
+                % (q, float(merge_sim_min), int(e_s.size))
+            )
+
+    # 3) 套用 sim 門檻（若有）
+    if merge_sim_min is not None:
+        keep = e_s >= float(merge_sim_min)
+        e_i = e_i[keep]
+        e_j = e_j[keep]
+        e_s = e_s[keep]
+
+    if e_s.size == 0:
+        parent, rank = _uf_init(N)
+        comp_id, roots = _compact_components(parent)
+        return comp_id, {
+            "n_candidates": int(n_candidates),
+            "n_edges_selected": 0,
+            "n_unions": 0,
+            "n_components": int(len(roots)),
+            "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
+            "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+        }
 
     p = float(merge_top_p)
     if not (0.0 < p <= 1.0):
@@ -653,6 +684,8 @@ def mutualk_merge_from_knn_sim(
         "selected_sim_mean": float(sel_s.mean()) if sel_s.size else 0.0,
         "selected_sim_min": float(sel_s.min()) if sel_s.size else 0.0,
         "selected_sim_max": float(sel_s.max()) if sel_s.size else 0.0,
+        "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
+        "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
     }
     return comp_id, info
 
@@ -696,6 +729,7 @@ def merge_step_from_knn(
     mutual_k=3,
     merge_top_p=0.01,
     merge_sim_min=None,
+    merge_sim_quantile=None,
     node_weight=None,
     max_cluster_weight=None,
     ensure_normalized=True,
@@ -726,6 +760,7 @@ def merge_step_from_knn(
         mutual_k=int(mutual_k),
         merge_top_p=float(merge_top_p),
         merge_sim_min=float(merge_sim_min) if merge_sim_min is not None else None,
+        merge_sim_quantile=float(merge_sim_quantile) if merge_sim_quantile is not None else None,
         node_weight=node_weight,
         max_cluster_weight=max_cluster_weight,
         verbose=verbose,
@@ -745,6 +780,7 @@ def merge_step_from_embeddings(
     merge_knn_topk=50,
     merge_top_p=0.01,
     merge_sim_min=None,
+    merge_sim_quantile=None,
     chunk_size=20000,
     node_weight=None,
     max_cluster_weight=None,
@@ -797,6 +833,7 @@ def merge_step_from_embeddings(
         mutual_k=mutual_k,
         merge_top_p=merge_top_p,
         merge_sim_min=merge_sim_min,
+        merge_sim_quantile=merge_sim_quantile,
         node_weight=node_weight,
         max_cluster_weight=max_cluster_weight,
         ensure_normalized=ensure_normalized,
@@ -821,6 +858,7 @@ def strict_dedup(
     merge_knn_topk=3,
     merge_top_p=1.0,
     merge_sim_min=0.92,
+    merge_sim_quantile=None,
     chunk_size=20000,
     max_iters=10,
     min_improve=0.001,
@@ -838,6 +876,12 @@ def strict_dedup(
       embeddings: (N, D)
       node_weight: (N,) 可選（原始權重），用於 cap（max_cluster_size）。
                    若直接對原始 spans 做 dedup，可不給（預設全 1）。
+
+      merge_sim_min:
+        - 固定門檻（相容舊行為）
+      merge_sim_quantile:
+        - 若 merge_sim_min=None 且 merge_sim_quantile != None，則以「mutual candidates 的 e_s」分位數決定門檻
+        - 例如 0.90 代表使用 90th percentile（只保留最上面 10% 的 mutual 邊）
 
     Output:
       cluster_id:   (N0,) int32，原始點 -> 最終 cluster id (0..n_clusters-1)
@@ -891,6 +935,7 @@ def strict_dedup(
             merge_knn_topk=int(merge_knn_topk),
             merge_top_p=float(merge_top_p),
             merge_sim_min=float(merge_sim_min) if merge_sim_min is not None else None,
+            merge_sim_quantile=float(merge_sim_quantile) if merge_sim_quantile is not None else None,
             chunk_size=int(chunk_size),
             node_weight=w_cur,
             max_cluster_weight=int(max_cluster_size),
@@ -1022,6 +1067,7 @@ def strict_dedup(
             "n_violations_over_cap": int((cluster_size > int(max_cluster_size)).sum()),
             "cap": int(max_cluster_size),
             "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
+            "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
             "mutual_k": int(mutual_k),
             "merge_knn_topk": int(merge_knn_topk),
             "merge_top_p": float(merge_top_p),
