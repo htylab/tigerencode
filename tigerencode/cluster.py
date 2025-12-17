@@ -12,11 +12,12 @@ A) Leiden clustering（群集）
 B) mutual-k merge（近重複壓縮 / 去重）
    - 核心：mutualk_merge_from_knn_sim(nbr_idx, nbr_sim, ...)
    - 單輪 step：merge_step_from_embeddings(...) 或 merge_step_from_knn(...)
-   - 多輪：strict_dedup(...)（反覆 step，維護 orig_to_cur / cap / history / rep_index）
+   - 多輪：knn_merge(...)（反覆 step，維護 orig_to_cur / cap / history / rep_index）
 
 公開 API（相容 + 新增）
 - embed_clustering_leiden(...)
-- strict_dedup(...)
+- knn_merge(...)
+- strict_dedup(...)（相容 alias）
 """
 
 import numpy as np
@@ -535,6 +536,9 @@ def mutualk_merge_from_knn_sim(
     merge_top_p=1.0,
     merge_sim_min=None,
     merge_sim_quantile=None,
+    sim_floor=None,
+    shared_neighbor_min=0,
+    shared_neighbor_topk=None,
     node_weight=None,
     max_cluster_weight=None,
     verbose=False,
@@ -615,23 +619,39 @@ def mutualk_merge_from_knn_sim(
     e_s = np.asarray(e_s, dtype=np.float32)
 
     # 2) 用 mutual candidates 的 e_s 分位數決定門檻（若未給 merge_sim_min）
+    thr_base = None
     if merge_sim_min is None and merge_sim_quantile is not None:
         q = float(merge_sim_quantile)
         if not (0.0 < q < 1.0):
             raise ValueError("merge_sim_quantile must be in (0,1), got %r" % q)
-        merge_sim_min = float(np.quantile(e_s, q))
+        thr_base = float(np.quantile(e_s, q))
+        merge_sim_min = thr_base
         if verbose:
             print(
                 "[mutualk/sim] quantile=%.4f => merge_sim_min=%.6f (from %d mutual edges)"
                 % (q, float(merge_sim_min), int(e_s.size))
             )
+    elif merge_sim_min is not None:
+        thr_base = float(merge_sim_min)
+
+    thr_eff = None
+    if sim_floor is None:
+        thr_eff = thr_base
+    elif thr_base is None:
+        thr_eff = float(sim_floor)
+    else:
+        thr_eff = max(float(sim_floor), thr_base)
 
     # 3) 套用 sim 門檻（若有）
-    if merge_sim_min is not None:
-        keep = e_s >= float(merge_sim_min)
+    if thr_eff is not None:
+        keep = e_s >= float(thr_eff)
         e_i = e_i[keep]
         e_j = e_j[keep]
         e_s = e_s[keep]
+
+    n_after_sim = int(e_s.size)
+    k_sn = K if shared_neighbor_topk is None else int(shared_neighbor_topk)
+    k_sn = max(1, min(k_sn, K))
 
     if e_s.size == 0:
         parent, rank = _uf_init(N)
@@ -643,7 +663,45 @@ def mutualk_merge_from_knn_sim(
             "n_components": int(len(roots)),
             "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
             "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+            "thr_base": float(thr_base) if thr_base is not None else None,
+            "thr_eff": float(thr_eff) if thr_eff is not None else None,
+            "sim_floor": float(sim_floor) if sim_floor is not None else None,
+            "shared_neighbor_min": int(shared_neighbor_min),
+            "shared_neighbor_topk": int(k_sn) if k_sn is not None else None,
+            "n_after_sim": int(n_after_sim),
+            "n_after_shared": 0,
         }
+
+    # 3.5) 共同鄰居過濾
+
+    if shared_neighbor_min > 0:
+        cache = {}
+
+        def _get_set(node):
+            v = cache.get(node)
+            if v is None:
+                v = set(nbr_idx[node, :k_sn].tolist())
+                cache[node] = v
+            return v
+
+        keep_shared = np.zeros_like(e_i, dtype=bool)
+        for t in range(int(e_i.size)):
+            ii = int(e_i[t])
+            jj = int(e_j[t])
+            set_i = _get_set(ii)
+            set_j = _get_set(jj)
+            if len(set_i) < len(set_j):
+                cnt = sum(1 for x in set_i if x in set_j)
+            else:
+                cnt = sum(1 for x in set_j if x in set_i)
+            if cnt >= int(shared_neighbor_min):
+                keep_shared[t] = True
+        e_i = e_i[keep_shared]
+        e_j = e_j[keep_shared]
+        e_s = e_s[keep_shared]
+        n_after_shared = int(e_s.size)
+    else:
+        n_after_shared = int(e_s.size)
 
     p = float(merge_top_p)
     if not (0.0 < p <= 1.0):
@@ -686,6 +744,13 @@ def mutualk_merge_from_knn_sim(
         "selected_sim_max": float(sel_s.max()) if sel_s.size else 0.0,
         "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
         "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+        "thr_base": float(thr_base) if thr_base is not None else None,
+        "thr_eff": float(thr_eff) if thr_eff is not None else None,
+        "sim_floor": float(sim_floor) if sim_floor is not None else None,
+        "shared_neighbor_min": int(shared_neighbor_min),
+        "shared_neighbor_topk": int(k_sn) if k_sn is not None else None,
+        "n_after_sim": int(n_after_sim),
+        "n_after_shared": int(n_after_shared),
     }
     return comp_id, info
 
@@ -730,6 +795,9 @@ def merge_step_from_knn(
     merge_top_p=0.01,
     merge_sim_min=None,
     merge_sim_quantile=None,
+    sim_floor=None,
+    shared_neighbor_min=0,
+    shared_neighbor_topk=None,
     node_weight=None,
     max_cluster_weight=None,
     ensure_normalized=True,
@@ -761,6 +829,9 @@ def merge_step_from_knn(
         merge_top_p=float(merge_top_p),
         merge_sim_min=float(merge_sim_min) if merge_sim_min is not None else None,
         merge_sim_quantile=float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+        sim_floor=float(sim_floor) if sim_floor is not None else None,
+        shared_neighbor_min=int(shared_neighbor_min),
+        shared_neighbor_topk=shared_neighbor_topk if shared_neighbor_topk is None else int(shared_neighbor_topk),
         node_weight=node_weight,
         max_cluster_weight=max_cluster_weight,
         verbose=verbose,
@@ -781,6 +852,9 @@ def merge_step_from_embeddings(
     merge_top_p=0.01,
     merge_sim_min=None,
     merge_sim_quantile=None,
+    sim_floor=None,
+    shared_neighbor_min=0,
+    shared_neighbor_topk=None,
     chunk_size=20000,
     node_weight=None,
     max_cluster_weight=None,
@@ -834,6 +908,9 @@ def merge_step_from_embeddings(
         merge_top_p=merge_top_p,
         merge_sim_min=merge_sim_min,
         merge_sim_quantile=merge_sim_quantile,
+        sim_floor=sim_floor,
+        shared_neighbor_min=shared_neighbor_min,
+        shared_neighbor_topk=shared_neighbor_topk,
         node_weight=node_weight,
         max_cluster_weight=max_cluster_weight,
         ensure_normalized=ensure_normalized,
@@ -850,15 +927,18 @@ def merge_step_from_embeddings(
 
 
 # -----------------------------
-# strict_dedup（多輪 iterative merge）
+# knn_merge（多輪 iterative merge）
 # -----------------------------
-def strict_dedup(
+def knn_merge(
     embeddings,
     mutual_k=3,
     merge_knn_topk=3,
     merge_top_p=1.0,
     merge_sim_min=0.92,
     merge_sim_quantile=None,
+    sim_floor=None,
+    shared_neighbor_min=0,
+    shared_neighbor_topk=None,
     chunk_size=20000,
     max_iters=10,
     min_improve=0.001,
@@ -936,6 +1016,9 @@ def strict_dedup(
             merge_top_p=float(merge_top_p),
             merge_sim_min=float(merge_sim_min) if merge_sim_min is not None else None,
             merge_sim_quantile=float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+            sim_floor=float(sim_floor) if sim_floor is not None else None,
+            shared_neighbor_min=int(shared_neighbor_min),
+            shared_neighbor_topk=shared_neighbor_topk if shared_neighbor_topk is None else int(shared_neighbor_topk),
             chunk_size=int(chunk_size),
             node_weight=w_cur,
             max_cluster_weight=int(max_cluster_size),
@@ -1068,6 +1151,9 @@ def strict_dedup(
             "cap": int(max_cluster_size),
             "merge_sim_min": float(merge_sim_min) if merge_sim_min is not None else None,
             "merge_sim_quantile": float(merge_sim_quantile) if merge_sim_quantile is not None else None,
+            "sim_floor": float(sim_floor) if sim_floor is not None else None,
+            "shared_neighbor_min": int(shared_neighbor_min),
+            "shared_neighbor_topk": int(shared_neighbor_topk) if shared_neighbor_topk is not None else None,
             "mutual_k": int(mutual_k),
             "merge_knn_topk": int(merge_knn_topk),
             "merge_top_p": float(merge_top_p),
@@ -1075,4 +1161,11 @@ def strict_dedup(
     }
 
     return cluster_id, X_final, cluster_size, rep_index, info
+
+
+def strict_dedup(*args, **kwargs):
+    import warnings
+
+    warnings.warn("strict_dedup is deprecated; use knn_merge instead", DeprecationWarning, stacklevel=2)
+    return knn_merge(*args, **kwargs)
 
