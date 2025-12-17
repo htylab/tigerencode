@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Embedding clustering and deduplication utilities.
+embed_clustering.py（legacy 風格，無 typing / 無 dataclass）
 
 包含兩條路徑：
 
@@ -18,17 +19,359 @@ B) mutual-k merge（近重複壓縮 / 去重）
 - strict_dedup(...)
 """
 
-import time
 import numpy as np
-
-from ._array_utils import _as_numpy, _l2_normalize_rows
-from .knn import compute_knn_similarity, drop_self_from_knn
-from .leiden import apply_edge_filter_and_weights, build_edges_from_knn, leiden_cluster
+import time
 
 
 # -----------------------------
-# Leiden clustering
+# utils
 # -----------------------------
+def _as_numpy(x):
+    if isinstance(x, np.ndarray):
+        return x
+    try:
+        import torch
+
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+    except Exception:
+        pass
+    return np.asarray(x)
+
+
+def _l2_normalize_rows(x, eps=1e-12):
+    x = _as_numpy(x)
+    n = np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.maximum(n, eps)
+
+
+def _try_import_torch():
+    try:
+        import torch
+
+        return torch
+    except Exception:
+        return None
+
+
+def _try_import_igraph():
+    try:
+        import igraph as ig
+        import leidenalg
+
+        return ig, leidenalg
+    except Exception:
+        return None, None
+
+
+# -----------------------------
+# Step4: KNN similarity (cosine)
+# -----------------------------
+def compute_knn_similarity(
+    embeddings,
+    topk=150,
+    chunk_size=20000,
+    ensure_normalized=True,
+    use_torch=True,
+    device="cuda",
+    verbose=False,
+):
+    """
+    回傳：
+      indices: (N, topk) int32
+      scores : (N, topk) float32
+    備註：topk 通常會包含自己（第一名），後續可選擇丟掉 self-loop。
+    """
+    X = _as_numpy(embeddings).astype(np.float32, copy=False)
+    if X.ndim != 2:
+        raise ValueError("embeddings must be 2D (N, D), got %r" % (X.shape,))
+
+    if ensure_normalized:
+        X = _l2_normalize_rows(X).astype(np.float32, copy=False)
+
+    N = X.shape[0]
+    if topk >= N:
+        topk = max(1, N - 1)
+
+    torch = _try_import_torch() if use_torch else None
+    if torch is not None:
+        ok = True
+        try:
+            if device == "cuda" and not torch.cuda.is_available():
+                ok = False
+        except Exception:
+            ok = False
+
+        if ok:
+            if verbose:
+                print("[KNN] using torch (%s)" % device)
+            X_t = torch.from_numpy(X)
+            if device:
+                X_t = X_t.to(device)
+
+            all_vals = np.empty((N, topk), dtype=np.float32)
+            all_idxs = np.empty((N, topk), dtype=np.int32)
+
+            for start in range(0, N, chunk_size):
+                end = min(N, start + chunk_size)
+                chunk = X_t[start:end]  # (B, D)
+                sims = chunk @ X_t.T  # (B, N)
+                vals, idxs = torch.topk(sims, k=topk, dim=1)
+
+                all_vals[start:end] = vals.detach().float().cpu().numpy()
+                all_idxs[start:end] = idxs.detach().cpu().numpy().astype(np.int32)
+
+            return {"indices": all_idxs, "scores": all_vals}
+
+    if verbose:
+        print("[KNN] torch/cuda not available, using CPU numpy (may be slow)")
+
+    all_vals = np.empty((N, topk), dtype=np.float32)
+    all_idxs = np.empty((N, topk), dtype=np.int32)
+
+    Xt = X.T
+    for start in range(0, N, chunk_size):
+        end = min(N, start + chunk_size)
+        chunk = X[start:end]  # (B, D)
+        sims = np.matmul(chunk, Xt)  # (B, N)
+
+        part = np.argpartition(-sims, kth=topk - 1, axis=1)[:, :topk]  # (B, topk)
+        part_sims = np.take_along_axis(sims, part, axis=1)  # (B, topk)
+        order = np.argsort(-part_sims, axis=1)
+        idxs = np.take_along_axis(part, order, axis=1)
+        vals = np.take_along_axis(part_sims, order, axis=1)
+
+        all_idxs[start:end] = idxs.astype(np.int32)
+        all_vals[start:end] = vals.astype(np.float32)
+
+    return {"indices": all_idxs, "scores": all_vals}
+
+
+def _drop_self_from_knn(knn_indices, knn_scores):
+    """
+    輸入：KNN (N, K)（通常第一名是自己）
+    輸出：去掉第一欄（若 K>=2），否則原樣回傳
+    """
+    idx = _as_numpy(knn_indices).astype(np.int32, copy=False)
+    sim = _as_numpy(knn_scores).astype(np.float32, copy=False)
+    if idx.ndim != 2 or sim.ndim != 2 or idx.shape != sim.shape:
+        raise ValueError("knn_indices/knn_scores must be (N,K) with same shape")
+
+    if idx.shape[1] >= 2:
+        return idx[:, 1:], sim[:, 1:]
+    return idx, sim
+
+
+# -----------------------------
+# Step5/6: Leiden（保留，不影響 merge）
+# -----------------------------
+def build_edges_from_knn(knn_indices, knn_scores, drop_self=True):
+    """
+    knn_indices: (N, K)
+    knn_scores : (N, K)
+    回傳 edge arrays（src/dst/sim）均為 1D array
+    """
+    nbr_idx = _as_numpy(knn_indices).astype(np.int32, copy=False)
+    nbr_sim = _as_numpy(knn_scores).astype(np.float32, copy=False)
+    if nbr_idx.shape != nbr_sim.shape:
+        raise ValueError("knn_indices shape != knn_scores shape")
+
+    N, K = nbr_idx.shape
+    if K == 0:
+        return {
+            "src": np.zeros((0,), np.int32),
+            "dst": np.zeros((0,), np.int32),
+            "sim": np.zeros((0,), np.float32),
+            "nbr_idx": nbr_idx,
+            "nbr_sim": nbr_sim,
+        }
+
+    if drop_self:
+        keep_mask = nbr_idx != np.arange(N, dtype=np.int32)[:, None]
+        rows_all_drop = np.where(~keep_mask.any(axis=1))[0]
+        if len(rows_all_drop) > 0:
+            keep_mask[rows_all_drop, 0] = True
+
+        src = np.repeat(np.arange(N, dtype=np.int32), K)[keep_mask.ravel()]
+        dst = nbr_idx.ravel()[keep_mask.ravel()]
+        sim = nbr_sim.ravel()[keep_mask.ravel()]
+        return {"src": src, "dst": dst, "sim": sim, "nbr_idx": nbr_idx, "nbr_sim": nbr_sim}
+
+    src = np.repeat(np.arange(N, dtype=np.int32), K)
+    dst = nbr_idx.ravel()
+    sim = nbr_sim.ravel()
+    return {"src": src, "dst": dst, "sim": sim, "nbr_idx": nbr_idx, "nbr_sim": nbr_sim}
+
+
+def apply_edge_filter_and_weights(
+    nbr_idx,
+    nbr_sim,
+    z_edge=0.5,
+    mutual_boost=1.5,
+    min_deg=2,
+    min_deg_weight=0.8,
+    verbose=False,
+):
+    """
+    Leiden 用的建邊策略：
+    - global z-score（用所有 sim 的 mean/std）→ mask = (z >= z_edge)
+    - mutual kNN 的邊：只做加權（sim * mutual_boost）
+    - 最低出度修補：若某點保留邊數 < min_deg，從原始 KNN 的前幾名補回（並把權重打折）
+    """
+    nbr_idx = _as_numpy(nbr_idx).astype(np.int32, copy=False)
+    nbr_sim = _as_numpy(nbr_sim).astype(np.float32, copy=False)
+    N, K1 = nbr_idx.shape
+
+    flat = nbr_sim.reshape(-1).astype(np.float32)
+    mu = float(flat.mean())
+    sigma = float(flat.std()) + 1e-8
+    z = (nbr_sim - mu) / sigma
+    mask = (z >= float(z_edge))
+
+    if verbose:
+        kept = int(mask.sum())
+        total = int(mask.size)
+        print("[edges] z_edge=%.3f kept %d / %d (%.2f%%)" % (z_edge, kept, total, 100.0 * kept / max(1, total)))
+
+    if mutual_boost is None:
+        mutual_boost = 1.0
+    mutual_boost = float(mutual_boost)
+
+    if mutual_boost != 1.0:
+        if verbose:
+            print("[edges] computing mutual mask for weighting...")
+        nbr_sets = [set(row.tolist()) for row in nbr_idx]
+        mutual_mask = np.zeros_like(nbr_sim, dtype=bool)
+        for i in range(N):
+            cols = nbr_idx[i]
+            mutual_mask[i] = np.array([i in nbr_sets[int(j)] for j in cols], dtype=bool)
+    else:
+        mutual_mask = None
+
+    src = np.repeat(np.arange(N, dtype=np.int32), K1)[mask.ravel()]
+    dst = nbr_idx.ravel()[mask.ravel()]
+    sim = nbr_sim.ravel()[mask.ravel()]
+
+    if mutual_mask is not None:
+        is_mutual = mutual_mask.ravel()[mask.ravel()]
+        sim = np.where(is_mutual, sim * mutual_boost, sim)
+
+    if min_deg is not None and int(min_deg) > 0:
+        min_deg = int(min_deg)
+        deg = np.bincount(src, minlength=N).astype(np.int32)
+        need_fix = np.where(deg < min_deg)[0]
+
+        if verbose:
+            print("[edges] min_deg=%d nodes needing fix=%d" % (min_deg, int(len(need_fix))))
+
+        if len(need_fix) > 0:
+            fix_src = []
+            fix_dst = []
+            fix_sim = []
+            min_deg_weight = float(min_deg_weight)
+
+            existing = {}
+            for i in need_fix.tolist():
+                existing[i] = set(dst[src == i].tolist())
+
+            for i in need_fix.tolist():
+                current_deg = int(deg[i])
+                needed = min_deg - current_deg
+                if needed <= 0:
+                    continue
+
+                max_try = min(K1, needed + 5)
+                for k in range(max_try):
+                    if current_deg >= min_deg:
+                        break
+                    j = int(nbr_idx[i, k])
+                    if j == i:
+                        continue
+                    if j in existing[i]:
+                        continue
+                    score = float(nbr_sim[i, k]) * min_deg_weight
+                    fix_src.append(i)
+                    fix_dst.append(j)
+                    fix_sim.append(score)
+                    existing[i].add(j)
+                    current_deg += 1
+
+            if len(fix_src) > 0:
+                src = np.concatenate([src, np.asarray(fix_src, dtype=np.int32)], axis=0)
+                dst = np.concatenate([dst, np.asarray(fix_dst, dtype=np.int32)], axis=0)
+                sim = np.concatenate([sim, np.asarray(fix_sim, dtype=np.float32)], axis=0)
+
+                order = np.argsort(-sim)
+                src2 = src[order]
+                dst2 = dst[order]
+                sim2 = sim[order]
+
+                seen = set()
+                keep = np.zeros_like(sim2, dtype=bool)
+                for t in range(sim2.shape[0]):
+                    key = (int(src2[t]), int(dst2[t]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    keep[t] = True
+
+                src = src2[keep]
+                dst = dst2[keep]
+                sim = sim2[keep]
+
+    return {
+        "src": src.astype(np.int32, copy=False),
+        "dst": dst.astype(np.int32, copy=False),
+        "sim": sim.astype(np.float32, copy=False),
+    }
+
+
+def leiden_cluster(src, dst, sim, n_nodes=None, resolution=1.0, seed=0):
+    ig, leidenalg = _try_import_igraph()
+    if ig is None or leidenalg is None:
+        raise ImportError("igraph/leidenalg not available. Please install python-igraph and leidenalg.")
+
+    src = _as_numpy(src).astype(np.int32, copy=False)
+    dst = _as_numpy(dst).astype(np.int32, copy=False)
+    sim = _as_numpy(sim).astype(float, copy=False)
+
+    if n_nodes is None:
+        if src.size == 0 and dst.size == 0:
+            n_nodes = 0
+        else:
+            n_nodes = int(max(int(src.max(initial=0)), int(dst.max(initial=0))) + 1)
+
+    g = ig.Graph(n=int(n_nodes))
+    if src.size > 0:
+        g.add_edges(list(zip(src.tolist(), dst.tolist())))
+        g.es["weight"] = sim.tolist()
+    else:
+        g.es["weight"] = []
+
+    try:
+        partition = leidenalg.find_partition(
+            g,
+            leidenalg.RBConfigurationVertexPartition,
+            weights=g.es["weight"],
+            resolution_parameter=float(resolution),
+            seed=int(seed),
+        )
+    except TypeError:
+        partition = leidenalg.find_partition(
+            g,
+            leidenalg.RBConfigurationVertexPartition,
+            weights=g.es["weight"],
+            resolution_parameter=float(resolution),
+        )
+
+    cluster_id = np.zeros(int(n_nodes), dtype=np.int32)
+    for cid, nodes in enumerate(partition):
+        for v in nodes:
+            cluster_id[int(v)] = int(cid)
+
+    return cluster_id, g
+
+
 def embed_clustering_leiden(
     embeddings,
     topk=150,
@@ -64,7 +407,7 @@ def embed_clustering_leiden(
     nbr_idx = edges0["nbr_idx"]
     nbr_sim = edges0["nbr_sim"]
 
-    nbr_idx2, nbr_sim2 = drop_self_from_knn(nbr_idx, nbr_sim)
+    nbr_idx2, nbr_sim2 = _drop_self_from_knn(nbr_idx, nbr_sim)
 
     edges = apply_edge_filter_and_weights(
         nbr_idx2,
@@ -223,12 +566,7 @@ def mutualk_merge_from_knn_sim(
     if kk <= 0:
         parent, rank = _uf_init(N)
         comp_id, roots = _compact_components(parent)
-        return comp_id, {
-            "n_candidates": 0,
-            "n_edges_selected": 0,
-            "n_unions": 0,
-            "n_components": int(len(roots)),
-        }
+        return comp_id, {"n_candidates": 0, "n_edges_selected": 0, "n_unions": 0, "n_components": int(len(roots))}
 
     e_i = []
     e_j = []
@@ -270,12 +608,7 @@ def mutualk_merge_from_knn_sim(
     if n_candidates == 0:
         parent, rank = _uf_init(N)
         comp_id, roots = _compact_components(parent)
-        return comp_id, {
-            "n_candidates": 0,
-            "n_edges_selected": 0,
-            "n_unions": 0,
-            "n_components": int(len(roots)),
-        }
+        return comp_id, {"n_candidates": 0, "n_edges_selected": 0, "n_unions": 0, "n_components": int(len(roots))}
 
     e_i = np.asarray(e_i, dtype=np.int32)
     e_j = np.asarray(e_j, dtype=np.int32)
@@ -398,9 +731,7 @@ def merge_step_from_knn(
         verbose=verbose,
     )
 
-    X_merged, comp_size = aggregate_embeddings_by_component(
-        X, comp_id, ensure_normalized=ensure_normalized
-    )
+    X_merged, comp_size = aggregate_embeddings_by_component(X, comp_id, ensure_normalized=ensure_normalized)
 
     if return_intermediates:
         inter = {"nbr_idx": nbr_idx, "nbr_sim": nbr_sim}
@@ -456,7 +787,8 @@ def merge_step_from_embeddings(
         verbose=verbose,
     )
 
-    nbr_idx, nbr_sim = drop_self_from_knn(knn["indices"], knn["scores"])
+    # 直接用 (N,K) 的 knn，去掉 self（通常是第 0 欄）
+    nbr_idx, nbr_sim = _drop_self_from_knn(knn["indices"], knn["scores"])
 
     out = merge_step_from_knn(
         X,
@@ -495,7 +827,7 @@ def strict_dedup(
     max_cluster_size=100,
     node_weight=None,
     ensure_normalized=True,
-    rep_chunk_size=5000,  # 計算 rep_index 時的 chunk（避免爆記憶體）
+    rep_chunk_size=5000,
     return_history=True,
     verbose=True,
 ):
@@ -643,6 +975,7 @@ def strict_dedup(
         X_cur = X_next
         prev_n = new_n
 
+    # final outputs
     cluster_id = orig_to_cur.astype(np.int32, copy=False)
     X_final = X_cur.astype(np.float32, copy=False)
 
@@ -660,6 +993,7 @@ def strict_dedup(
         c = cluster_id[st:ed]
         scores[st:ed] = np.sum(X0n[st:ed] * Xcn[c], axis=1)
 
+    # cluster_id 為主鍵（分群），-scores 為次鍵（分群內高分在前）
     order = np.lexsort((-scores, cluster_id))
     cid_sorted = cluster_id[order]
     idx_sorted = np.arange(N0, dtype=np.int64)[order]
@@ -695,3 +1029,4 @@ def strict_dedup(
     }
 
     return cluster_id, X_final, cluster_size, rep_index, info
+
