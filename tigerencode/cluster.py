@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Embedding clustering and deduplication utilities.
 embed_clustering.py（legacy 風格，無 typing / 無 dataclass）
 
 包含兩條路徑：

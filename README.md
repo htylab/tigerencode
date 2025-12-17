@@ -62,6 +62,9 @@ alongside the package.
 
 ### Clustering and deduplication utilities
 
+> Clustering relies on `python-igraph` and `leidenalg`, which are installed as part of
+> the package dependencies.
+
 ```python
 import tigerencode
 import numpy as np

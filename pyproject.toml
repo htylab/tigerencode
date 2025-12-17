@@ -26,6 +26,8 @@ classifiers = [
 dependencies = [
     "numpy",
     "Pillow",
+    "igraph",
+    "leidenalg",
     "torch",
     "timm",
     "tqdm",
