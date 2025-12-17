@@ -59,3 +59,33 @@ image_model.set_adaptor(projection_adaptor)
 When an ONNX file path is provided, TigerEncode will lazily convert it to a PyTorch
 module using [`onnx2torch`](https://github.com/onnx/onnx2torch), which is installed
 alongside the package.
+
+### Clustering and deduplication utilities
+
+> Clustering relies on `python-igraph` and `leidenalg`, which are installed as part of
+> the package dependencies.
+
+```python
+import tigerencode
+import numpy as np
+
+# Leiden clustering over embeddings
+embeddings = np.random.rand(1000, 128).astype(np.float32)
+cluster_ids = tigerencode.embed_clustering_leiden(
+    embeddings,
+    topk=150,
+    resolutions=[0.5, 1.0, 1.5],
+    verbose=False,
+)
+
+# Strict deduplication with iterative mutual-k merging
+cluster_id, merged_embeddings, cluster_size, rep_index, info = tigerencode.strict_dedup(
+    embeddings,
+    mutual_k=3,
+    merge_knn_topk=50,
+    merge_top_p=0.01,
+    merge_sim_min=0.92,
+    max_cluster_size=100,
+    verbose=True,
+)
+```
