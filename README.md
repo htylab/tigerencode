@@ -79,7 +79,7 @@ cluster_ids = tigerencode.embed_clustering_leiden(
 )
 
 # Strict deduplication with iterative mutual-k merging
-cluster_id, merged_embeddings, cluster_size, rep_index, info = tigerencode.strict_dedup(
+cluster_id, merged_embeddings, cluster_size, rep_index, info = tigerencode.knn_merge(
     embeddings,
     mutual_k=3,
     merge_knn_topk=50,
@@ -88,4 +88,6 @@ cluster_id, merged_embeddings, cluster_size, rep_index, info = tigerencode.stric
     max_cluster_size=100,
     verbose=True,
 )
+
+# `strict_dedup` remains available as a compatibility alias.
 ```
